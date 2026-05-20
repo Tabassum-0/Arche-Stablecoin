@@ -1,6 +1,6 @@
-1.Relative Stability: Anchored or pegged -> $1.00
+1.Relative Stability: Anchored or pegged -> 1.00 doller
     i. Chainlink Price Feed
-    ii.Set a function to exchange ETH & BTC -> $$$
+    ii.Set a function to exchange ETH & BTC -> Doller
 2.Stability Machanism (Minting): Algorithmic (Decentralized)
     i.People can only mint the stablecoin with enough collateral (coded)
 3.Collateral: Exogenous (Crypto)

@@ -198,7 +198,7 @@ contract ARCEngine is ReentrancyGuard {
         }
     }
 
-    function _moreThanZero(uint256 amount) internal pure{
+    function _moreThanZero(uint256 amount) internal pure {
         if (amount == 0) {
             revert ARCEngine__NeedsMoreThanZero();
         }

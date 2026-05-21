@@ -10,7 +10,7 @@ contract DeployARC is Script {
     address[] public tokenAddresses;
     address[] public priceFeedAddresses;
 
-    function run() external returns (DecentralizedStableCoin, ARCEngine) {
+    function run() external returns (DecentralizedStableCoin, ARCEngine, HelperConfig) {
         HelperConfig config = new HelperConfig();
 
         (address wethUsdPriceFeed, address wbtcUsdPriceFeed, address weth, address wbtc, uint256 deployerKey) =
@@ -18,12 +18,12 @@ contract DeployARC is Script {
         tokenAddresses = [weth, wbtc];
         priceFeedAddresses = [wethUsdPriceFeed, wbtcUsdPriceFeed];
 
-        vm.startBroadcast();
-        DecentralizedStableCoin arc = new DecentralizedStableCoin(msg.sender);
+        vm.startBroadcast(deployerKey);
+        DecentralizedStableCoin arc = new DecentralizedStableCoin(vm.addr(deployerKey));
         ARCEngine engine = new ARCEngine(tokenAddresses, priceFeedAddresses, address(arc));
 
         arc.transferOwnership(address(engine));
         vm.stopBroadcast();
-        return (arc, engine);
+        return (arc, engine, config);
     }
 }

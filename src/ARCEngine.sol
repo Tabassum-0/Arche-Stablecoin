@@ -15,7 +15,6 @@
 
 // Layout of Functions:
 // constructor
-// receive function (if exists)
 // fallback function (if exists)
 // external
 // public
@@ -60,9 +59,11 @@ contract ARCEngine is ReentrancyGuard {
     error ARCEngine__NeedsMoreThanZero();
     error ARCEngine__TokenAddressesAndPrcieFeedAddressesMustBeSameLength();
     error ARCEngine__NotAllowedToken();
-    error ARCEngine__transferFailed();
+    error ARCEngine__TransferFailed();
     error ARCEngine__BreaksHealthFactor(uint256 healthFactor);
     error ARCEngine__MintFailed();
+    error DSCEngine__HealthFactorOk();
+    error ARCEngine__HealthFactorNotImproved();
 
     //////////////////////////
     ////  STATE VARIABLE  ///
@@ -71,20 +72,24 @@ contract ARCEngine is ReentrancyGuard {
     uint256 private constant PRECISION = 1e18;
     uint256 private constant LIQUIDATION_THRESHOLD = 50; //200% overcollateralized
     uint256 private constant LIQUIDATION_PRECISION = 100;
-    uint256 private constant MIN_HEALTH_FACTOR = 1;
+    uint256 private constant MIN_HEALTH_FACTOR = 1e18;
+    uint256 private constant LIQUIDATION_BONUS = 10; //This means a 10% bonus
 
     mapping(address token => address priceFeed) private sPriceFeeds; //tokenPriceFeed
     mapping(address user => mapping(address token => uint256 amount)) private sCollateralDeposited;
     mapping(address user => uint256 amountArcMinted) private sArcMinted;
     address[] private sCollateralToken;
 
-    DecentralizedStableCoin private immutable iArc;
+    DecentralizedStableCoin private immutable I_ARC;
 
     ///////////////
     //  EVENTS  //
     //////////////
 
     event CollateralDeposited(address indexed user, address indexed token, uint256 indexed amount);
+    event CollateralRedeemed(
+        address indexed redeemedFrom, address indexed redeemedTo, address indexed token, uint256 amount
+    );
 
     ///////////////
     // MODIFIERS //
@@ -113,14 +118,29 @@ contract ARCEngine is ReentrancyGuard {
             sPriceFeeds[tokenAddresses[i]] = priceFeedAddresses[i];
             sCollateralToken.push(tokenAddresses[i]);
         }
-        iArc = DecentralizedStableCoin(arcAddress);
+        I_ARC = DecentralizedStableCoin(arcAddress);
     }
 
     /////////////////////////////
     ////  EXTERNAL FUNCTIONS  ///
     ////////////////////////////
 
-    function depositCollateralAndMintArc() external {}
+    /**
+     *
+     * @param tokenCollateralAddress The address of the token to deposit as collateral
+     * @param amountCollateral The amount of collateral to deposit
+     * @param amountArcToMint The amouny of decentralized stablecoin to mint
+     * @notice this function will deposit your collateral and mint ARC in one transaction
+     */
+
+    function depositCollateralAndMintArc(
+        address tokenCollateralAddress,
+        uint256 amountCollateral,
+        uint256 amountArcToMint
+    ) external {
+        depositCollateral(tokenCollateralAddress, amountCollateral);
+        mintArc(amountArcToMint);
+    }
 
     /**
      *@notice follows CEI
@@ -129,7 +149,7 @@ contract ARCEngine is ReentrancyGuard {
      */
 
     function depositCollateral(address tokenCollateralAddress, uint256 amountCollateral)
-        external
+        public
         moreThanZero(amountCollateral)
         isAllowedToken(tokenCollateralAddress)
         nonReentrant
@@ -138,38 +158,125 @@ contract ARCEngine is ReentrancyGuard {
         emit CollateralDeposited(msg.sender, tokenCollateralAddress, amountCollateral);
         bool success = IERC20(tokenCollateralAddress).transferFrom(msg.sender, address(this), amountCollateral);
         if (!success) {
-            revert ARCEngine__transferFailed();
+            revert ARCEngine__TransferFailed();
         }
     }
 
-    function redeemCollateralForArc() external {}
+    /**
+     *
+     * @param tokenCollateralAddress The collateral address to redeem
+     * @param amountCollateral The amount collateral to reedem
+     * @param amountArcToBurn The amount of decentralized stablecoin to burn
+     * This function burns ARC and redeems underlying collateral in one transaction
+     */
 
-    function redeemCollateral() external {}
+    function redeemCollateralForArc(address tokenCollateralAddress, uint256 amountCollateral, uint256 amountArcToBurn)
+        external
+    {
+        burnArc(amountArcToBurn);
+        redeemCollateral(tokenCollateralAddress, amountCollateral);
+        //RedeemCollateral already checks health factor
+    }
+
+    //CEI: Check, Effects, Interactions
+    function redeemCollateral(address tokenCollateralAddress, uint256 amountCollateral)
+        public
+        moreThanZero(amountCollateral)
+        nonReentrant
+    {
+        _redeemCollateral(tokenCollateralAddress, amountCollateral, msg.sender, msg.sender);
+        _revertIfHealthFactorIsBroken(msg.sender);
+    }
 
     /**
      * @notice follows CEI
      * @param amountArcToMint is The amount of decentralized stablecoin to mint
      * @notice they must have more collateral value than the minimum thresehold
      */
-    function mintArc(uint256 amountArcToMint) external moreThanZero(amountArcToMint) nonReentrant {
+    function mintArc(uint256 amountArcToMint) public moreThanZero(amountArcToMint) nonReentrant {
         sArcMinted[msg.sender] += amountArcToMint;
 
         _revertIfHealthFactorIsBroken(msg.sender);
-        bool minted = iArc.mint(msg.sender, amountArcToMint);
+        bool minted = I_ARC.mint(msg.sender, amountArcToMint);
         if (!minted) {
             revert ARCEngine__MintFailed();
         }
     }
 
-    function burnArc() external {}
+    function burnArc(uint256 amount) public moreThanZero(amount) {
+        _burnArc(amount, msg.sender, msg.sender);
+        _revertIfHealthFactorIsBroken(msg.sender);
+    }
 
-    function liquidate() external {}
+    /**
+     *
+     * @param collateral The erc20 collateral address to liquidate from the user
+     * @param user The user who has broken the health factor.Their _healthFactor should be below MIN_HEALTH_FACTOR
+     * @param debtToCover The amount of DSC you want to burn to improve the users health factor
+     * @notice You can partially liquidate a user
+     * @notice You will get a liquidate bonus fro taking the users funds
+     * @notice This function working assumes the protocol will be roughly 200% overcollateralized in orde for this to work
+     * @notice A known bug would be if the protocol were 100% or less collateralized, then we wouldnt be able to incentive the liquiditors
+     * For example, if the price of the collateral plummeted before anyone could be liquidated.
+     *
+     * Follows CEI: Checks, Effects, Interactions
+     */
+    function liquidate(address collateral, address user, uint256 debtToCover)
+        external
+        moreThanZero(debtToCover)
+        nonReentrant
+    {
+        uint256 startingUserHealthFactor = _healthFactor(user);
+        if (startingUserHealthFactor >= MIN_HEALTH_FACTOR) {
+            revert DSCEngine__HealthFactorOk();
+        }
+        //Bad user: $140 ETH, $100 DSC
+        //Debt to cover = $100
+
+        uint256 tokenAmountFromDebtCovered = getTokenAmountFromUsd(collateral, debtToCover);
+        uint256 bonusCollateral = (tokenAmountFromDebtCovered * LIQUIDATION_BONUS) / LIQUIDATION_PRECISION;
+        uint256 totalCollateralToRedeem = tokenAmountFromDebtCovered + bonusCollateral;
+        _redeemCollateral(collateral, totalCollateralToRedeem, user, msg.sender);
+        _burnArc(debtToCover, user, msg.sender);
+
+        uint256 endingUserHealthFactor = _healthFactor(user);
+        if (endingUserHealthFactor <= startingUserHealthFactor) {
+            revert ARCEngine__HealthFactorNotImproved();
+        }
+        _revertIfHealthFactorIsBroken(msg.sender);
+    }
 
     function getHealthFactor() external view {}
 
     ///////////////////////////////////////
     ///PRIVATE & INTERNAL VIEW FUNCTIONS///
     ///////////////////////////////////////
+
+    /**
+     * @dev low-level internal function, do not call unless the function calling it,
+     * is checking for health factor being broken
+     */
+    function _burnArc(uint256 amountArcToBurn, address onBehalfOf, address arcFrom) private {
+        sArcMinted[onBehalfOf] -= amountArcToBurn;
+        bool success = I_ARC.transferFrom(arcFrom, address(this), amountArcToBurn);
+        if (!success) {
+            revert ARCEngine__TransferFailed();
+        }
+        I_ARC.burn(amountArcToBurn);
+    }
+
+    function _redeemCollateral(address tokenCollateralAddress, uint256 amountCollateral, address from, address to)
+        private
+    {
+        sCollateralDeposited[from][tokenCollateralAddress] -= amountCollateral;
+        emit CollateralRedeemed(from, to, tokenCollateralAddress, amountCollateral);
+        //Calculate health factor
+        bool success = IERC20(tokenCollateralAddress).transfer(to, amountCollateral);
+        if (!success) {
+            revert ARCEngine__TransferFailed();
+        }
+    }
+
     function _getAccountInformation(address user)
         private
         view
@@ -207,6 +314,12 @@ contract ARCEngine is ReentrancyGuard {
     /// PUBLIC & EXTERNAL VIEW FUNCTIONS //
     ///////////////////////////////////////
 
+    function getTokenAmountFromUsd(address token, uint256 usdAmountInWei) public view returns (uint256) {
+        AggregatorV3Interface priceFeed = AggregatorV3Interface(sPriceFeeds[token]);
+        (, int256 price,,,) = priceFeed.latestRoundData();
+        return (usdAmountInWei * PRECISION) / (uint256(price) * ADDITIONAL_FEED_PRECISION);
+    }
+
     function getAccountCollateralValue(address user) public view returns (uint256 totalCollateralValueInUsd) {
         for (uint256 i = 0; i < sCollateralToken.length; i++) {
             address token = sCollateralToken[i];
@@ -223,5 +336,13 @@ contract ARCEngine is ReentrancyGuard {
         //The returned value from CL will be 1000 * 1e8
         //1e8 = 1 * 10^8 = 100000000
         return ((uint256(price) * ADDITIONAL_FEED_PRECISION) * amount) / PRECISION;
+    }
+
+    function getAccountInformation(address user)
+        external
+        view
+        returns (uint256 totalArcMinted, uint256 collateralValueInUsd)
+    {
+        (totalArcMinted, collateralValueInUsd) = _getAccountInformation(user);
     }
 }

@@ -288,6 +288,9 @@ contract ARCEngine is ReentrancyGuard {
 
     function _healthFactor(address user) private view returns (uint256) {
         (uint256 totalArcMinted, uint256 collateralValueInUsd) = _getAccountInformation(user);
+        if (totalArcMinted == 0) {
+            return type(uint256).max;
+        }
         uint256 collateralAdjustedForThreshold = (collateralValueInUsd * LIQUIDATION_THRESHOLD) / LIQUIDATION_PRECISION;
         return (collateralAdjustedForThreshold * PRECISION) / totalArcMinted;
     }

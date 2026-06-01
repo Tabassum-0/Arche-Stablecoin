@@ -8,6 +8,7 @@ import {DecentralizedStableCoin} from "../../src/DecentralizedStableCoin.sol";
 import {ARCEngine} from "../../src/ARCEngine.sol";
 import {HelperConfig} from "../../script/HelperConfig.s.sol";
 import {ERC20Mock} from "../../test/mocks/ERC20Mock.sol";
+import {MockV3Aggregator} from "../../test/mocks/MockV3Aggregator.sol";
 
 contract ARCEngineTest is Test {
     DeployARC deployer;
@@ -26,7 +27,9 @@ contract ARCEngineTest is Test {
 
     uint256 public constant AMOUNT_COLLATERAL = 10 ether;
     uint256 public constant STARTING_ERC20_BALANCE = 10 ether;
-    uint256 public constant AMOUNT_ARC_TO_MINT = 100e18;
+    uint256 public constant AMOUNT_ARC = 100e18;
+    uint256 public constant AMOUNT_DEBT = 100e18;
+
 
     function setUp() public {
         deployer = new DeployARC();
@@ -52,7 +55,7 @@ contract ARCEngineTest is Test {
     modifier depositedCollateralAndMintedArc() {
         vm.startPrank(USER);
         ERC20Mock(weth).approve(address(engine), AMOUNT_COLLATERAL);
-        engine.depositCollateralAndMintArc(weth, AMOUNT_COLLATERAL, AMOUNT_ARC_TO_MINT);
+        engine.depositCollateralAndMintArc(weth, AMOUNT_COLLATERAL, AMOUNT_ARC);
         vm.stopPrank();
         _;
     }
@@ -198,13 +201,13 @@ contract ARCEngineTest is Test {
     // ── Happy path ──
     function testCanMintArc() public depositedCollateral {
         vm.startPrank(USER);
-        engine.mintArc(AMOUNT_ARC_TO_MINT);
+        engine.mintArc(AMOUNT_ARC);
         vm.stopPrank();
 
         (uint256 totalArcMinted,) = engine.getAccountInformation(USER);
-        assertEq(totalArcMinted, AMOUNT_ARC_TO_MINT);
+        assertEq(totalArcMinted, AMOUNT_ARC);
         // ARC token balance
-        assertEq(arc.balanceOf(USER), AMOUNT_ARC_TO_MINT);
+        assertEq(arc.balanceOf(USER), AMOUNT_ARC);
     }
 
     // ── Minting right at the boundary should succeed ──
@@ -227,7 +230,7 @@ contract ARCEngineTest is Test {
     function testDepositCollateralAndMintArcUpdatesState() public depositedCollateralAndMintedArc {
         (uint256 totalArcMinted, uint256 collateralValueInUsd) = engine.getAccountInformation(USER);
 
-        assertEq(totalArcMinted, AMOUNT_ARC_TO_MINT);
+        assertEq(totalArcMinted, AMOUNT_ARC);
         uint256 deposited = engine.getTokenAmountFromUsd(weth, collateralValueInUsd);
         assertEq(deposited, AMOUNT_COLLATERAL);
     }
@@ -257,17 +260,17 @@ contract ARCEngineTest is Test {
     // ── Burn more than minted should underflow/revert ──
     function testRevertsIfBurnMoreThanMinted() public depositedCollateralAndMintedArc {
         vm.startPrank(USER);
-        arc.approve(address(engine), AMOUNT_ARC_TO_MINT + 1);
+        arc.approve(address(engine), AMOUNT_ARC + 1);
         vm.expectRevert(); // arithmetic underflow on sArcMinted
-        engine.burnArc(AMOUNT_ARC_TO_MINT + 1);
+        engine.burnArc(AMOUNT_ARC + 1);
         vm.stopPrank();
     }
 
     // ── Happy path: full burn ──
     function testCanBurnArcFully() public depositedCollateralAndMintedArc {
         vm.startPrank(USER);
-        arc.approve(address(engine), AMOUNT_ARC_TO_MINT);
-        engine.burnArc(AMOUNT_ARC_TO_MINT);
+        arc.approve(address(engine), AMOUNT_ARC);
+        engine.burnArc(AMOUNT_ARC);
         vm.stopPrank();
 
         (uint256 totalArcMinted,) = engine.getAccountInformation(USER);
@@ -277,7 +280,7 @@ contract ARCEngineTest is Test {
 
     // ── Happy path: partial burn ──
     function testCanBurnArcPartially() public depositedCollateralAndMintedArc {
-        uint256 burnAmount = AMOUNT_ARC_TO_MINT / 2;
+        uint256 burnAmount = AMOUNT_ARC / 2;
 
         vm.startPrank(USER);
         arc.approve(address(engine), burnAmount);
@@ -285,7 +288,7 @@ contract ARCEngineTest is Test {
         vm.stopPrank();
 
         (uint256 totalArcMinted,) = engine.getAccountInformation(USER);
-        assertEq(totalArcMinted, AMOUNT_ARC_TO_MINT - burnAmount);
+        assertEq(totalArcMinted, AMOUNT_ARC - burnAmount);
     }
 
     // ── Burn without token approval should revert ──
@@ -293,7 +296,7 @@ contract ARCEngineTest is Test {
         vm.startPrank(USER);
         // no arc.approve()
         vm.expectRevert();
-        engine.burnArc(AMOUNT_ARC_TO_MINT);
+        engine.burnArc(AMOUNT_ARC);
         vm.stopPrank();
     }
 
@@ -355,13 +358,87 @@ contract ARCEngineTest is Test {
         uint256 wethBalanceBefore = ERC20Mock(weth).balanceOf(USER);
 
         vm.startPrank(USER);
-        arc.approve(address(engine), AMOUNT_ARC_TO_MINT);
-        engine.redeemCollateralForArc(weth, AMOUNT_COLLATERAL, AMOUNT_ARC_TO_MINT);
+        arc.approve(address(engine), AMOUNT_ARC);
+        engine.redeemCollateralForArc(weth, AMOUNT_COLLATERAL, AMOUNT_ARC);
         vm.stopPrank();
 
         (uint256 totalArcMinted, uint256 collateralValueInUsd) = engine.getAccountInformation(USER);
         assertEq(totalArcMinted, 0);
         assertEq(collateralValueInUsd, 0);
         assertEq(ERC20Mock(weth).balanceOf(USER), wethBalanceBefore + AMOUNT_COLLATERAL);
+    }
+    function testRevertsRedeemCollateralForArcIfHealthFactorBreaks() public depositedCollateralAndMintedArc {
+        // Burn only half the ARC but try to redeem all collateral → health factor breaks
+        vm.startPrank(USER);
+        arc.approve(address(engine), AMOUNT_ARC);
+        vm.expectRevert();
+        engine.redeemCollateralForArc(weth, AMOUNT_COLLATERAL, AMOUNT_ARC / 2);
+        vm.stopPrank();
+    }
+    /*//////////////////////////////////////////////////////////////
+                        HEALTH FACTOR TESTS
+    //////////////////////////////////////////////////////////////*/
+    function testHealthFactorIsMaxWhenNoArcMinted() public depositedCollateral {
+        // After just depositing (no mint), reading getAccountInformation should still work
+        (uint256 totalArcMinted,) = engine.getAccountInformation(USER);
+        assertEq(totalArcMinted, 0);
+        vm.startPrank(USER);
+        engine.redeemCollateral(weth, AMOUNT_COLLATERAL);
+        vm.stopPrank();
+    }
+    function testHealthFactorCalculationIsCorrect() public depositedCollateralAndMintedArc {
+        // 10 ETH * $2000 = $20 000 collateral
+        // Adjusted = $20 000 * 50 / 100 = $10 000
+        // Health factor = $10 000e18 / $100e18 = 100e18
+        // i.e. 100x overcollateralized
+        (uint256 totalArcMinted, uint256 collateralValueInUsd) = engine.getAccountInformation(USER);
+
+        uint256 adjustedCollateral = (collateralValueInUsd * 50) / 100;
+        uint256 expectedHealthFactor = (adjustedCollateral * 1e18) / totalArcMinted;
+
+        assertEq(expectedHealthFactor, 100e18);
+    }
+    /*//////////////////////////////////////////////////////////////
+                        LIQUIDATION TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    // ── Error: DSCEngine__HealthFactorOk (user is healthy) ──
+    function testRevertsLiquidateIfHealthFactorIsOk() public depositedCollateralAndMintedArc {
+        vm.startPrank(LIQUIDATOR);
+        vm.expectRevert(ARCEngine.DSCEngine__HealthFactorOk.selector);
+        engine.liquidate(weth, USER, AMOUNT_DEBT);
+        vm.stopPrank();
+    }
+    // ── Error: ARCEngine__NeedsMoreThanZero ──
+    function testRevertsLiquidateIfDebtToCoverIsZero() public depositedCollateralAndMintedArc {
+        vm.startPrank(LIQUIDATOR);
+        vm.expectRevert(ARCEngine.ARCEngine__NeedsMoreThanZero.selector);
+        engine.liquidate(weth, USER, 0);
+        vm.stopPrank();
+    }
+    
+    // ── Liquidation bonus is 10% ──
+    function testLiquidationBonusIs10Percent() public depositedCollateralAndMintedArc {
+        int256 crashedPrice = 18e8;
+        MockV3Aggregator(ethUsdPriceFeed).updateAnswer(crashedPrice);
+
+        vm.startPrank(LIQUIDATOR);
+        ERC20Mock(weth).approve(address(engine), 100 ether);
+        engine.depositCollateralAndMintArc(weth, 100 ether, AMOUNT_ARC);
+        vm.stopPrank();
+
+        uint256 liquidatorWethBefore = ERC20Mock(weth).balanceOf(LIQUIDATOR);
+
+        vm.startPrank(LIQUIDATOR);
+        arc.approve(address(engine), AMOUNT_DEBT);
+        engine.liquidate(weth, USER, AMOUNT_DEBT);
+        vm.stopPrank();
+
+        uint256 tokenAmountFromDebt = engine.getTokenAmountFromUsd(weth, AMOUNT_ARC);
+        uint256 expectedBonus = tokenAmountFromDebt / 10; // 10%
+        uint256 expectedTotal = tokenAmountFromDebt + expectedBonus;
+
+        uint256 actualReceived = ERC20Mock(weth).balanceOf(LIQUIDATOR) - liquidatorWethBefore;
+        assertEq(actualReceived, expectedTotal);
     }
 }

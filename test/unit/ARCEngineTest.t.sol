@@ -30,7 +30,6 @@ contract ARCEngineTest is Test {
     uint256 public constant AMOUNT_ARC = 100e18;
     uint256 public constant AMOUNT_DEBT = 100e18;
 
-
     function setUp() public {
         deployer = new DeployARC();
         (arc, engine, config) = deployer.run();
@@ -367,6 +366,7 @@ contract ARCEngineTest is Test {
         assertEq(collateralValueInUsd, 0);
         assertEq(ERC20Mock(weth).balanceOf(USER), wethBalanceBefore + AMOUNT_COLLATERAL);
     }
+
     function testRevertsRedeemCollateralForArcIfHealthFactorBreaks() public depositedCollateralAndMintedArc {
         // Burn only half the ARC but try to redeem all collateral → health factor breaks
         vm.startPrank(USER);
@@ -375,6 +375,7 @@ contract ARCEngineTest is Test {
         engine.redeemCollateralForArc(weth, AMOUNT_COLLATERAL, AMOUNT_ARC / 2);
         vm.stopPrank();
     }
+
     /*//////////////////////////////////////////////////////////////
                         HEALTH FACTOR TESTS
     //////////////////////////////////////////////////////////////*/
@@ -386,6 +387,7 @@ contract ARCEngineTest is Test {
         engine.redeemCollateral(weth, AMOUNT_COLLATERAL);
         vm.stopPrank();
     }
+
     function testHealthFactorCalculationIsCorrect() public depositedCollateralAndMintedArc {
         // 10 ETH * $2000 = $20 000 collateral
         // Adjusted = $20 000 * 50 / 100 = $10 000
@@ -398,6 +400,7 @@ contract ARCEngineTest is Test {
 
         assertEq(expectedHealthFactor, 100e18);
     }
+
     /*//////////////////////////////////////////////////////////////
                         LIQUIDATION TESTS
     //////////////////////////////////////////////////////////////*/
@@ -409,6 +412,7 @@ contract ARCEngineTest is Test {
         engine.liquidate(weth, USER, AMOUNT_DEBT);
         vm.stopPrank();
     }
+
     // ── Error: ARCEngine__NeedsMoreThanZero ──
     function testRevertsLiquidateIfDebtToCoverIsZero() public depositedCollateralAndMintedArc {
         vm.startPrank(LIQUIDATOR);
@@ -416,7 +420,7 @@ contract ARCEngineTest is Test {
         engine.liquidate(weth, USER, 0);
         vm.stopPrank();
     }
-    
+
     // ── Liquidation bonus is 10% ──
     function testLiquidationBonusIs10Percent() public depositedCollateralAndMintedArc {
         int256 crashedPrice = 18e8;

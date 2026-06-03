@@ -78,7 +78,8 @@ contract ARCEngine is ReentrancyGuard {
     mapping(address token => address priceFeed) private sPriceFeeds; //tokenPriceFeed
     mapping(address user => mapping(address token => uint256 amount)) private sCollateralDeposited;
     mapping(address user => uint256 amountArcMinted) private sArcMinted;
-    address[] private sCollateralToken;
+
+    address[] private sCollateralTokens;
 
     DecentralizedStableCoin private immutable I_ARC;
 
@@ -116,7 +117,7 @@ contract ARCEngine is ReentrancyGuard {
 
         for (uint256 i = 0; i < tokenAddresses.length; i++) {
             sPriceFeeds[tokenAddresses[i]] = priceFeedAddresses[i];
-            sCollateralToken.push(tokenAddresses[i]);
+            sCollateralTokens.push(tokenAddresses[i]);
         }
         I_ARC = DecentralizedStableCoin(arcAddress);
     }
@@ -173,9 +174,9 @@ contract ARCEngine is ReentrancyGuard {
     function redeemCollateralForArc(address tokenCollateralAddress, uint256 amountCollateral, uint256 amountArcToBurn)
         external
     {
-        burnArc(amountArcToBurn);
-        redeemCollateral(tokenCollateralAddress, amountCollateral);
-        //RedeemCollateral already checks health factor
+        _burnArc(amountArcToBurn, msg.sender, msg.sender);
+        _redeemCollateral(tokenCollateralAddress, amountCollateral, msg.sender, msg.sender);
+        _revertIfHealthFactorIsBroken(msg.sender);
     }
 
     //CEI: Check, Effects, Interactions
@@ -324,8 +325,8 @@ contract ARCEngine is ReentrancyGuard {
     }
 
     function getAccountCollateralValue(address user) public view returns (uint256 totalCollateralValueInUsd) {
-        for (uint256 i = 0; i < sCollateralToken.length; i++) {
-            address token = sCollateralToken[i];
+        for (uint256 i = 0; i < sCollateralTokens.length; i++) {
+            address token = sCollateralTokens[i];
             uint256 amount = sCollateralDeposited[user][token];
             totalCollateralValueInUsd += getUsdValue(token, amount);
         }
@@ -347,5 +348,49 @@ contract ARCEngine is ReentrancyGuard {
         returns (uint256 totalArcMinted, uint256 collateralValueInUsd)
     {
         (totalArcMinted, collateralValueInUsd) = _getAccountInformation(user);
+    }
+
+    function getHealthFactor(address user) external view returns (uint256) {
+        return _healthFactor(user);
+    }
+
+    function getCollateralBalanceOfUser(address user, address token) external view returns (uint256) {
+        return sCollateralDeposited[user][token];
+    }
+
+    function getPrecision() external pure returns (uint256) {
+        return PRECISION;
+    }
+
+    function getAdditionalFeedPrecision() external pure returns (uint256) {
+        return ADDITIONAL_FEED_PRECISION;
+    }
+
+    function getLiquidationThreshold() external pure returns (uint256) {
+        return LIQUIDATION_THRESHOLD;
+    }
+
+    function getLiquidationBonus() external pure returns (uint256) {
+        return LIQUIDATION_BONUS;
+    }
+
+    function getLiquidationPrecision() external pure returns (uint256) {
+        return LIQUIDATION_PRECISION;
+    }
+
+    function getMinHealthFactor() external pure returns (uint256) {
+        return MIN_HEALTH_FACTOR;
+    }
+
+    function getCollateralTokens() external view returns (address[] memory) {
+        return sCollateralTokens;
+    }
+
+    function getArc() external view returns (address) {
+        return address(I_ARC);
+    }
+
+    function getCollateralTokenPriceFeed(address token) external view returns (address) {
+        return sPriceFeeds[token];
     }
 }
